@@ -1,0 +1,14 @@
+{
+    "files.associations": {
+        "Absyn.C": "cpp",
+        "Test.C": "cpp",
+        "Parser.C": "cpp",
+        "Printer.C": "cpp",
+        "Skeleton.C": "cpp",
+        "Buffer.C": "cpp",
+        "TypeChecker.C": "cpp",
+        "Lexer.C": "cpp",
+        "Frontend.C": "cpp",
+        "new": "cpp"
+    }
+}
