@@ -1,0 +1,14 @@
+boolean foo(){
+  return false;
+}
+
+int main () {
+  boolean b;
+  
+  if (true == "true") {
+
+    return 1;
+  } else {
+    return 1;
+  }
+}
