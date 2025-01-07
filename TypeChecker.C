@@ -369,10 +369,11 @@ public:
         bool initialHasReturnStatement = hasReturnStatement;
         if (isAlwaysTrue(p->expr_)) {
             p->stmt_->accept(this);
-            hasReturnStatement = initialHasReturnStatement || hasReturnStatement;
         } else if (!isAlwaysFalse(p->expr_)) {
             p->stmt_->accept(this);
+            hasReturnStatement = false;
         }
+        hasReturnStatement = initialHasReturnStatement || hasReturnStatement;
     }
 
     void visitCondElse(CondElse *p) override {
@@ -380,6 +381,7 @@ public:
         if (!dynamic_cast<Bool*>(condType)) {
             throw std::runtime_error("Type error: Condition in 'if-else' statement must be a boolean.");
         }
+        bool initialHasReturnStatement = hasReturnStatement;
         bool thenHasReturn = false;
         bool elseHasReturn = false;
 
@@ -396,6 +398,7 @@ public:
             elseHasReturn = hasReturnStatement;
             hasReturnStatement = thenHasReturn && elseHasReturn;
         }
+        hasReturnStatement = initialHasReturnStatement || hasReturnStatement;
     }
 
     void visitWhile(While *p) override {
@@ -600,84 +603,119 @@ public:
 
     // Helper function to infer the type of an expression
     Type* inferExprType(Expr* expr) {
-    if (dynamic_cast<ELitInt*>(expr)) {
-        return new Int();
-    } else if (dynamic_cast<EString*>(expr)) {
-        return new Str();
-    } else if (dynamic_cast<EVar*>(expr)) {
-        EVar* var = dynamic_cast<EVar*>(expr);
-        auto it = symbolTable.find(var->ident_);
-        if (it != symbolTable.end()) {
-            return it->second;
-        } else {
-            throw std::runtime_error("Type error: Variable '" + std::string(var->ident_) + "' not declared.");
-        }
-    } else if (dynamic_cast<ELitTrue*>(expr) || dynamic_cast<ELitFalse*>(expr)) {
-        return new Bool();
-    } else if (dynamic_cast<EApp*>(expr)) {
-        EApp* app = dynamic_cast<EApp*>(expr);
-        auto it = functionTable.find(app->ident_);
-        if (it != functionTable.end()) {
-            return it->second.returnType;
-        } else {
-            throw std::runtime_error("Type error: Function '" + std::string(app->ident_) + "' not declared.");
-        }
-    } else if (dynamic_cast<EAdd*>(expr)) {
-        EAdd* addExpr = dynamic_cast<EAdd*>(expr);
-        Type* leftType = inferExprType(addExpr->expr_1);
-        Type* rightType = inferExprType(addExpr->expr_2);
-        Plus* plusOp = dynamic_cast<Plus*>(addExpr->addop_);
-        Minus* minusOp = dynamic_cast<Minus*>(addExpr->addop_);
-
-        if (plusOp) {
-            if (dynamic_cast<Int*>(leftType) && dynamic_cast<Int*>(rightType)) {
-                return new Int();
-            } else if (dynamic_cast<Str*>(leftType) && dynamic_cast<Str*>(rightType)) {
-                return new Str();
-            } else {
-                throw std::runtime_error("Type error: Addition is only allowed on integers or strings.");
-            }
-        } else if (minusOp) {
-            if (dynamic_cast<Int*>(leftType) && dynamic_cast<Int*>(rightType)) {
-                return new Int();
-            } else {
-                throw std::runtime_error("Type error: Subtraction is only allowed on integers.");
-            }
-        }
-    } else if (dynamic_cast<EMul*>(expr)) {
-        EMul* mulExpr = dynamic_cast<EMul*>(expr);
-        Type* leftType = inferExprType(mulExpr->expr_1);
-        Type* rightType = inferExprType(mulExpr->expr_2);
-        if (dynamic_cast<Int*>(leftType) && dynamic_cast<Int*>(rightType)) {
+        if (dynamic_cast<ELitInt*>(expr)) {
             return new Int();
-        } else {
-            throw std::runtime_error("Type error: Multiplication is only allowed on integers.");
-        }
-    } else if (dynamic_cast<ERel*>(expr)) {
-        ERel* relExpr = dynamic_cast<ERel*>(expr);
-        Type* leftType = inferExprType(relExpr->expr_1);
-        Type* rightType = inferExprType(relExpr->expr_2);
-        RelOp* relop = relExpr->relop_;
-
-        if (dynamic_cast<LTH*>(relop) || dynamic_cast<LE*>(relop) || dynamic_cast<GTH*>(relop) || dynamic_cast<GE*>(relop)) {
-            if (!dynamic_cast<Int*>(leftType) || !dynamic_cast<Int*>(rightType)) {
-                throw std::runtime_error("Type error: Relational operators <, <=, >, >= are only allowed on integers.");
+        } else if (dynamic_cast<EString*>(expr)) {
+            return new Str();
+        } else if (dynamic_cast<EVar*>(expr)) {
+            EVar* var = dynamic_cast<EVar*>(expr);
+            auto it = symbolTable.find(var->ident_);
+            if (it != symbolTable.end()) {
+                return it->second;
+            } else {
+                throw std::runtime_error("Type error: Variable '" + std::string(var->ident_) + "' not declared.");
             }
+        } else if (dynamic_cast<ELitTrue*>(expr) || dynamic_cast<ELitFalse*>(expr)) {
             return new Bool();
-        } else if (dynamic_cast<EQU*>(relop) || dynamic_cast<NE*>(relop)) {
-            if ((dynamic_cast<Int*>(leftType) && dynamic_cast<Int*>(rightType)) ||
-                (dynamic_cast<Bool*>(leftType) && dynamic_cast<Bool*>(rightType))) {
+        } else if (dynamic_cast<EApp*>(expr)) {
+            EApp* app = dynamic_cast<EApp*>(expr);
+            auto it = functionTable.find(app->ident_);
+            if (it != functionTable.end()) {
+                return it->second.returnType;
+            } else {
+                throw std::runtime_error("Type error: Function '" + std::string(app->ident_) + "' not declared.");
+            }
+        } else if (dynamic_cast<EAdd*>(expr)) {
+            EAdd* addExpr = dynamic_cast<EAdd*>(expr);
+            Type* leftType = inferExprType(addExpr->expr_1);
+            Type* rightType = inferExprType(addExpr->expr_2);
+            Plus* plusOp = dynamic_cast<Plus*>(addExpr->addop_);
+            Minus* minusOp = dynamic_cast<Minus*>(addExpr->addop_);
+
+            if (plusOp) {
+                if (dynamic_cast<Int*>(leftType) && dynamic_cast<Int*>(rightType)) {
+                    return new Int();
+                } else if (dynamic_cast<Str*>(leftType) && dynamic_cast<Str*>(rightType)) {
+                    return new Str();
+                } else {
+                    throw std::runtime_error("Type error: Addition is only allowed on integers or strings.");
+                }
+            } else if (minusOp) {
+                if (dynamic_cast<Int*>(leftType) && dynamic_cast<Int*>(rightType)) {
+                    return new Int();
+                } else {
+                    throw std::runtime_error("Type error: Subtraction is only allowed on integers.");
+                }
+            }
+        } else if (dynamic_cast<EMul*>(expr)) {
+            EMul* mulExpr = dynamic_cast<EMul*>(expr);
+            Type* leftType = inferExprType(mulExpr->expr_1);
+            Type* rightType = inferExprType(mulExpr->expr_2);
+            if (dynamic_cast<Int*>(leftType) && dynamic_cast<Int*>(rightType)) {
+                return new Int();
+            } else {
+                throw std::runtime_error("Type error: Multiplication is only allowed on integers.");
+            }
+        } else if (dynamic_cast<ERel*>(expr)) {
+            ERel* relExpr = dynamic_cast<ERel*>(expr);
+            Type* leftType = inferExprType(relExpr->expr_1);
+            Type* rightType = inferExprType(relExpr->expr_2);
+            RelOp* relop = relExpr->relop_;
+
+            if (dynamic_cast<LTH*>(relop) || dynamic_cast<LE*>(relop) || dynamic_cast<GTH*>(relop) || dynamic_cast<GE*>(relop)) {
+                if (!dynamic_cast<Int*>(leftType) || !dynamic_cast<Int*>(rightType)) {
+                    throw std::runtime_error("Type error: Relational operators <, <=, >, >= are only allowed on integers.");
+                }
+                return new Bool();
+            } else if (dynamic_cast<EQU*>(relop) || dynamic_cast<NE*>(relop)) {
+                if ((dynamic_cast<Int*>(leftType) && dynamic_cast<Int*>(rightType)) ||
+                    (dynamic_cast<Bool*>(leftType) && dynamic_cast<Bool*>(rightType))) {
+                    return new Bool();
+                } else {
+                    throw std::runtime_error("Type error: Equality operators ==, != are only allowed on integers or booleans.");
+                }
+            } else {
+                throw std::runtime_error("Unknown relational operation.");
+            }
+        } else if (dynamic_cast<Neg*>(expr)) {
+            Neg* negExpr = dynamic_cast<Neg*>(expr);
+            Type* innerType = inferExprType(negExpr->expr_);
+            if (dynamic_cast<Int*>(innerType)) {
+                return new Int();
+            } else {
+                throw std::runtime_error("Type error: Negation is only allowed on integers.");
+            }
+        } else if (dynamic_cast<Not*>(expr)) {
+            Not* notExpr = dynamic_cast<Not*>(expr);
+            Type* innerType = inferExprType(notExpr->expr_);
+            if (dynamic_cast<Bool*>(innerType)) {
                 return new Bool();
             } else {
-                throw std::runtime_error("Type error: Equality operators ==, != are only allowed on integers or booleans.");
+                throw std::runtime_error("Type error: Logical NOT is only allowed on booleans.");
             }
-        } else {
-            throw std::runtime_error("Unknown relational operation.");
+        } else if (dynamic_cast<EAnd*>(expr)) {
+            EAnd* andExpr = dynamic_cast<EAnd*>(expr);
+            Type* leftType = inferExprType(andExpr->expr_1);
+            Type* rightType = inferExprType(andExpr->expr_2);
+            if (dynamic_cast<Bool*>(leftType) && dynamic_cast<Bool*>(rightType)) {
+                return new Bool();
+            } else {
+                throw std::runtime_error("Type error: Logical AND is only allowed on booleans.");
+            }
+        } else if (dynamic_cast<EOr*>(expr)) {
+            EOr* orExpr = dynamic_cast<EOr*>(expr);
+            Type* leftType = inferExprType(orExpr->expr_1);
+            Type* rightType = inferExprType(orExpr->expr_2);
+            if (dynamic_cast<Bool*>(leftType) && dynamic_cast<Bool*>(rightType)) {
+                return new Bool();
+            } else {
+                throw std::runtime_error("Type error: Logical OR is only allowed on booleans.");
+            }
         }
+        // Additional type inference cases as needed
+        return nullptr;
     }
-    // Additional type inference cases as needed
-    return nullptr;
-}
+
 
     // Helper function to compare types
     bool typesEqual(Type* a, Type* b) {
@@ -739,6 +777,11 @@ int main(int argc, char **argv) {
 
     if (parse_tree) {
         std::cout << "\nParse Successful!\n";
+        ShowAbsyn *s = new ShowAbsyn();
+        printf("%s\n\n", s->show(parse_tree));
+        printf("[Linearized Tree]\n");
+        PrintAbsyn *p = new PrintAbsyn();
+        printf("%s\n\n", p->print(parse_tree));
 
         TypeChecker checker;
         try {

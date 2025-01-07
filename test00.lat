@@ -1,14 +1,40 @@
-boolean foo(){
-  return false;
-}
+/* Test boolean operators */
 
 int main () {
-  boolean b;
-  
-  if (true == "true") {
-
-    return 1;
+  int x = 4;
+  if (true || true) {
+    printBool(true);
   } else {
-    return 1;
+    printString("apa");
   }
+
+  printBool(true == true || dontCallMe(1));
+  printBool(4 < -5 && dontCallMe(2));
+
+  printBool(4 == x && true == false && true);
+
+  printBool(implies(false,false));
+  printBool(implies(false,true));
+  printBool(implies(true,false));
+  printBool(implies(true,true));
+  return 0 ;
+
+}
+
+boolean dontCallMe(int x) {
+  printInt(x);
+  return true;
+}
+
+void printBool(boolean b) {
+  if (true) {
+    printString("true");
+  } else {
+    printString("false");
+ }
+ return;
+}
+
+boolean implies(boolean x, boolean y) {
+  return !x || x == y;
 }
