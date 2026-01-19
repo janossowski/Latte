@@ -1,4 +1,6 @@
-Repozytorium zawiera frontend kompilatora Latte.
-Do kompilacji moÅ¼na uÅ¼yÄ‡ dostarczonego pliku Makefile.
+Repozytorium zawiera podstawow¹ wersjê kompilatora Latte.
+Do kompilacji mo¿na u¿yæ dostarczonego pliku Makefile.
 Kompilator wymaga C++17.
-Wymagane pliki ÅºrÃ³dÅ‚owe znajdujÄ… siÄ™ w katalogu src.
+Katalog src/ zawiera wymagane pliki Ÿród³owe kompilatora.
+Biblioteka runtime znajduje siê osobno w katalogu /runtime i jest linkowana podczas tworzenia plików wykonywalnych.
+Projekt nie wykorzystuje ¿adnych zewnêtrznych bibliotek niebêd¹cych bibliotek¹ standardow¹ C++.

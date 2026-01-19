@@ -11,6 +11,37 @@ class AsmGenerator : public Visitor {
 private:
     std::ostream &out;
 
+        /* =========================
+       Hybrid evaluation stack
+       ========================= */
+
+    enum class SlotKind { REG, STACK };
+
+    struct Slot {
+        SlotKind kind;
+        std::string reg; // only valid if kind == REG
+    };
+
+    std::vector<std::string> freeEvalRegs;
+    std::vector<Slot> vstack;
+
+    // push current %rax onto hybrid stack (reg if possible else real stack)
+    void vpushRax();
+
+    // pop the top hybrid slot into the given register
+    void vpopTo(const std::string& dst);
+
+    // spill all register-backed virtual stack slots to real stack
+    // (required before calls)
+    void spillVStack();
+
+    int oldestRegSlotIndex() const;
+
+    void evictOldestRegToStack();
+
+    // reset hybrid stack for a new function
+    void resetVStack();
+
     std::map<std::string, int> locals;
     int stackOffset = 0;
     int labelCounter = 0;

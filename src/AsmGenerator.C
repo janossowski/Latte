@@ -51,6 +51,103 @@ static std::string escape(const std::string &s) {
     return out;
 }
 
+void AsmGenerator::resetVStack() {
+    vstack.clear();
+    freeEvalRegs.clear();
+
+    // caller-saved, safe scratch regs (not used for arg passing)
+    // choose as many as you like
+    freeEvalRegs.push_back("%rcx");
+    freeEvalRegs.push_back("%r8");
+    freeEvalRegs.push_back("%r9");
+    // freeEvalRegs.push_back("%r10");
+    // freeEvalRegs.push_back("%r11");
+    // freeEvalRegs.push_back("%rdx"); // careful with idiv
+}
+
+
+void AsmGenerator::vpushRax() {
+    // If no free regs, evict oldest reg-backed value into real stack
+    if (freeEvalRegs.empty()) {
+        // Only possible if there exists some REG slot already
+        // (because otherwise we were storing everything in memory already)
+        if (oldestRegSlotIndex() != -1) {
+            evictOldestRegToStack();
+        }
+    }
+
+    if (!freeEvalRegs.empty()) {
+        std::string r = freeEvalRegs.back();
+        freeEvalRegs.pop_back();
+
+        emit("  movq %rax, " + r);
+        vstack.push_back({SlotKind::REG, r});
+    } else {
+        // no regs at all -> spill directly
+        emit("  pushq %rax");
+        vstack.push_back({SlotKind::STACK, ""});
+    }
+}
+
+
+void AsmGenerator::vpopTo(const std::string& dst) {
+    if (vstack.empty())
+        throw std::runtime_error("Internal compiler error: vpop from empty vstack");
+
+    Slot s = vstack.back();
+    vstack.pop_back();
+
+    if (s.kind == SlotKind::REG) {
+        emit("  movq " + s.reg + ", " + dst);
+        freeEvalRegs.push_back(s.reg);
+    } else {
+        emit("  popq " + dst);
+    }
+}
+
+
+void AsmGenerator::spillVStack() {
+    // Turn all REG slots into STACK slots, preserving order
+    for (auto &s : vstack) {
+        if (s.kind == SlotKind::REG) {
+            emit("  pushq " + s.reg);
+            freeEvalRegs.push_back(s.reg);
+            s.kind = SlotKind::STACK;
+            s.reg.clear();
+        }
+    }
+}
+
+int AsmGenerator::oldestRegSlotIndex() const {
+    for (int i = 0; i < (int)vstack.size(); ++i) {
+        if (vstack[i].kind == SlotKind::REG)
+            return i;
+    }
+    return -1;
+}
+
+void AsmGenerator::evictOldestRegToStack() {
+    int idx = oldestRegSlotIndex();
+    if (idx == -1)
+        throw std::runtime_error("Internal compiler error: no REG slot to evict");
+
+    std::string reg = vstack[idx].reg;
+
+    // push it to real stack (becomes older part of stack)
+    emit("  pushq " + reg);
+
+    // free that register
+    freeEvalRegs.push_back(reg);
+
+    // convert that slot to STACK
+    vstack[idx].kind = SlotKind::STACK;
+    vstack[idx].reg.clear();
+
+    // IMPORTANT: this keeps all remaining REG slots at the end,
+    // because we removed the oldest one.
+}
+
+
 void AsmGenerator::visitProgram(Program *) {}
 void AsmGenerator::visitTopDef(TopDef *) {}
 void AsmGenerator::visitArg(Arg *) {}
@@ -74,6 +171,7 @@ void AsmGenerator::visitFnDef(FnDef *p) {
     stackOffset = 0;
     currentReturnLabel = newLabel(".Lreturn");
     currentFunction = p;
+    resetVStack();
 
     emit("");
     emit(".globl " + std::string(p->ident_));
@@ -284,13 +382,14 @@ void AsmGenerator::visitELitFalse(ELitFalse *) {
 }
 
 void AsmGenerator::visitEString(EString *p) {
+    spillVStack(); // IMPORTANT: call may clobber %r10/%r11
+
     std::string lbl = newLabel(".str");
     stringLiterals.push_back(lbl + ": .string \"" + escape(p->string_) + "\"");
 
     emit("  leaq " + lbl + "(%rip), %rdi");
-    emit("  call string_from_cstr");
+    emit("  call string_from_cstr"); // returns String* in %rax
 }
-
 
 void AsmGenerator::visitNeg(Neg *p) {
     p->expr_->accept(this);
@@ -306,62 +405,101 @@ void AsmGenerator::visitNot(Not *p) {
 
 void AsmGenerator::visitEMul(EMul *p) {
     p->expr_1->accept(this);
-    emit("  pushq %rax");
+    vpushRax();
 
     p->expr_2->accept(this);
-    emit("  popq %rcx");
+    vpopTo("%r10");   // r10 = left, rax = right  (SAFE: r10 not in pool)
 
     if (dynamic_cast<Times *>(p->mulop_)) {
-        emit("  imulq %rcx, %rax");
+        emit("  imulq %r10, %rax");
+        return;
     }
-    else if (dynamic_cast<Div *>(p->mulop_)) {
-        emit("  movq %rax, %rdi");
-        emit("  movq %rcx, %rax");
+
+    // division/mod clobbers rax/rdx, so flush any eval regs still alive
+    // spillVStack();
+
+    if (dynamic_cast<Div *>(p->mulop_)) {
+        emit("  movq %rax, %r11");  // divisor = right
+        emit("  movq %r10, %rax");  // dividend = left
         emit("  cqto");
-        emit("  idivq %rdi");
+        emit("  idivq %r11");
+        return;
     }
-    else if (dynamic_cast<Mod *>(p->mulop_)) {
-        emit("  movq %rax, %rdi");
-        emit("  movq %rcx, %rax");
+
+    if (dynamic_cast<Mod *>(p->mulop_)) {
+        emit("  movq %rax, %r11");
+        emit("  movq %r10, %rax");
         emit("  cqto");
-        emit("  idivq %rdi");
+        emit("  idivq %r11");
         emit("  movq %rdx, %rax");
+        return;
     }
 }
-
 
 void AsmGenerator::visitEAdd(EAdd *p) {
     Type* t = p->inferredType;
 
+    // lhs -> %rax
     p->expr_1->accept(this);
-    emit("  pushq %rax");
+    vpushRax();
+
+    // rhs -> %rax
     p->expr_2->accept(this);
-    emit("  popq %rcx");
 
     if (dynamic_cast<Plus*>(p->addop_)) {
         if (isInt(t)) {
-            emit("  addq %rcx, %rax");
+            // lhs -> %r10, rhs already in %rax
+            vpopTo("%r10");
+            emit("  addq %r10, %rax");   // rax = rhs + lhs
         } else if (isStr(t)) {
-            emit("  movq %rcx, %rdi");
+            // string_concat(lhs, rhs)
+            // lhs -> %rdi, rhs -> %rsi
+            vpopTo("%rdi");
             emit("  movq %rax, %rsi");
+            spillVStack();
             emit("  call string_concat");
         }
     } else {
-        emit("  subq %rax, %rcx");
-        emit("  movq %rcx, %rax");
+        // minus (only ints by typechecker)
+        // compute lhs - rhs
+        vpopTo("%r10");                 // r10 = lhs
+        emit("  subq %rax, %r10");       // r10 = lhs - rhs
+        emit("  movq %r10, %rax");       // result -> rax
     }
 }
-
 
 void AsmGenerator::visitERel(ERel *p) {
     Type* t = p->expr_1->inferredType;
 
     p->expr_1->accept(this);
-    emit("  pushq %rax");
+    vpushRax();
     p->expr_2->accept(this);
-    emit("  popq %rcx");
 
-    emit("  cmpq %rax, %rcx");
+    // If strings, handle via runtime calls
+    if (isStr(t)) {
+        if (dynamic_cast<EQU*>(p->relop_)) {
+            vpopTo("%rdi");          // lhs
+            emit("  movq %rax, %rsi"); // rhs
+            spillVStack();
+            emit("  call string_eq");  // result 0/1 in rax
+            return;
+        }
+        if (dynamic_cast<NE*>(p->relop_)) {
+            vpopTo("%rdi");
+            emit("  movq %rax, %rsi");
+            spillVStack();
+            emit("  call string_eq");
+            emit("  xorq $1, %rax");
+            return;
+        }
+
+        // (<, <=, >, >=) not allowed on strings by typechecker
+        throw std::runtime_error("Internal compiler error: invalid string relational op");
+    }
+
+    // Non-string: compare lhs vs rhs
+    vpopTo("%r10");         // r10 = lhs, rax = rhs
+    emit("  cmpq %rax, %r10");
 
     std::string trueLbl = newLabel(".Ltrue");
     std::string endLbl  = newLabel(".Lend");
@@ -370,28 +508,12 @@ void AsmGenerator::visitERel(ERel *p) {
     else if (dynamic_cast<LE*>(p->relop_)) emit("  jle " + trueLbl);
     else if (dynamic_cast<GTH*>(p->relop_)) emit("  jg " + trueLbl);
     else if (dynamic_cast<GE*>(p->relop_)) emit("  jge " + trueLbl);
-    else if (dynamic_cast<EQU*>(p->relop_)) {
-        if (isStr(t)) {
-            emit("  movq %rcx, %rdi");
-            emit("  movq %rax, %rsi");
-            emit("  call string_eq");
-            return;
-        }
-        emit("  je " + trueLbl);
-    }
-    else if (dynamic_cast<NE*>(p->relop_)) {
-        if (isStr(t)) {
-            emit("  movq %rcx, %rdi");
-            emit("  movq %rax, %rsi");
-            emit("  call string_eq");
-            emit("  xorq $1, %rax");
-            return;
-        }
-        emit("  jne " + trueLbl);
-    }
+    else if (dynamic_cast<EQU*>(p->relop_)) emit("  je " + trueLbl);
+    else if (dynamic_cast<NE*>(p->relop_)) emit("  jne " + trueLbl);
 
     emit("  movq $0, %rax");
     emit("  jmp " + endLbl);
+
     emit(trueLbl + ":");
     emit("  movq $1, %rax");
     emit(endLbl + ":");
@@ -438,6 +560,8 @@ void AsmGenerator::visitEOr(EOr *p) {
 }
 
 void AsmGenerator::visitEApp(EApp *p) {
+    spillVStack(); // IMPORTANT: protect any pending virtual stack values
+
     static const char* argRegs[] = {
         "%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"
     };
@@ -445,10 +569,6 @@ void AsmGenerator::visitEApp(EApp *p) {
     int argCount    = p->listexpr_ ? (int)p->listexpr_->size() : 0;
     int regArgs     = std::min(6, argCount);
     int stackArgs   = (argCount > 6) ? (argCount - 6) : 0;
-
-    /* ============================================================
-       How many stack slots must exist for callee to do safe TCO?
-       ============================================================ */
 
     int requiredArgs = argCount;
     if (currentFunction != nullptr) {
@@ -461,40 +581,32 @@ void AsmGenerator::visitEApp(EApp *p) {
     int requiredStackArgs = (requiredArgs > 6) ? (requiredArgs - 6) : 0;
     int paddingStackArgs  = std::max(0, requiredStackArgs - stackArgs);
 
-    /* ============================================================
-       Can we tail-call optimize?
-       ============================================================ */
-
     bool canTailCall =
         inTailCallPosition &&
         currentFunction != nullptr &&
         std::string(currentFunction->ident_) != "main";
 
-    /* ============================================================
-       TAIL CALL PATH
-       ============================================================ */
     if (canTailCall) {
-        // Evaluate all arguments left-to-right and push results
-        // Stack top after: argN ... arg1
+        // evaluate args and push results
         for (int i = 0; i < argCount; ++i) {
             (*p->listexpr_)[i]->accept(this);
             emit("  pushq %rax");
         }
 
-        // Write real stack args into 16(%rbp)+ (arg7..argN)
+        // write stack args to 16(%rbp)+
         for (int i = argCount; i >= 7; --i) {
             int slotOffset = 16 + (i - 7) * 8;
-            emit("  popq %rax"); // arg i
+            emit("  popq %rax");
             emit("  movq %rax, " + std::to_string(slotOffset) + "(%rbp)");
         }
 
-        // Fill required padding stack args (if needed): arg7..argK slots must exist
+        // padding slots
         for (int k = stackArgs + 1; k <= requiredStackArgs; ++k) {
-            int slotOffset = 16 + (k - 1) * 8; // k=1 means arg7
+            int slotOffset = 16 + (k - 1) * 8;
             emit("  movq $0, " + std::to_string(slotOffset) + "(%rbp)");
         }
 
-        // Pop reg args into registers (arg6..arg1)
+        // pop reg args
         for (int i = regArgs; i >= 1; --i) {
             emit("  popq %rax");
             emit("  movq %rax, " + std::string(argRegs[i - 1]));
@@ -505,43 +617,31 @@ void AsmGenerator::visitEApp(EApp *p) {
         return;
     }
 
-    /* ============================================================
-       NORMAL CALL PATH (with correct padding order)
-       ============================================================ */
-
-    // 1) Push padding stack args FIRST (farthest from return address)
-    for (int i = 0; i < paddingStackArgs; ++i) {
+    // padding first
+    for (int i = 0; i < paddingStackArgs; ++i)
         emit("  pushq $0");
-    }
 
-    // 2) Push real stack args (7+) right-to-left (closest to return address)
-    printf("Not tail calling function %s with %d args (regs: %d, stack: %d, padding: %d)\n",
-           p->ident_.c_str(), argCount, regArgs, stackArgs, paddingStackArgs);
+    // real stack args right-to-left
     for (int i = argCount - 1; i >= 6; --i) {
         (*p->listexpr_)[i]->accept(this);
-        printf("  # Pushing stack arg %d in function %s\n", i + 1, p->ident_.c_str());
         emit("  pushq %rax");
     }
 
-    // 3) Evaluate reg args (1..6) left-to-right and push temporarily
+    // reg args left-to-right, pushed temporarily
     for (int i = 0; i < regArgs; ++i) {
         (*p->listexpr_)[i]->accept(this);
         emit("  pushq %rax");
     }
 
-    // 4) Pop reg args into registers in reverse order
-    for (int i = regArgs - 1; i >= 0; --i) {
+    // pop into regs
+    for (int i = regArgs - 1; i >= 0; --i)
         emit("  popq " + std::string(argRegs[i]));
-    }
 
-    // 5) Call
     emit("  call " + std::string(p->ident_));
 
-    // 6) Cleanup stack args + padding
     int totalStackPushed = stackArgs + paddingStackArgs;
-    if (totalStackPushed > 0) {
+    if (totalStackPushed > 0)
         emit("  addq $" + std::to_string(totalStackPushed * 8) + ", %rsp");
-    }
 }
 
 void AsmGenerator::visitPlus(Plus *) {}

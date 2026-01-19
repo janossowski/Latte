@@ -57,6 +57,16 @@ String* readString(void) {
     if (len < 0)
         error();
 
+    if (len > 0 && buffer[len - 1] == '\n') {
+        buffer[len - 1] = '\0';
+        len--;
+    }
+
+    if (len > 0 && buffer[len - 1] == '\r') {
+        buffer[len - 1] = '\0';
+        len--;
+    }
+
     String* s = string_from_cstr(buffer);
     free(buffer);
     return s;
