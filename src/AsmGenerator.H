@@ -53,6 +53,10 @@ private:
     FnDef* currentFunction = nullptr;
     bool inTailCallPosition = false;
 
+    // jumping code
+    void genCond(Expr* e, const std::string& Ltrue, const std::string& Lfalse);
+    void genBool(Expr* e);
+
     void emit(const std::string &s);
     std::string newLabel(const std::string &prefix);
 

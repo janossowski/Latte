@@ -147,6 +147,150 @@ void AsmGenerator::evictOldestRegToStack() {
     // because we removed the oldest one.
 }
 
+/* ============================================================
+   Jumping code: genCond / genBool
+   ============================================================ */
+
+void AsmGenerator::genCond(Expr* e, const std::string& Ltrue, const std::string& Lfalse) {
+    if (!e) {
+        emit("  jmp " + Lfalse);
+        return;
+    }
+
+    /* ----------------------------
+       Literal booleans
+       ---------------------------- */
+    if (dynamic_cast<ELitTrue*>(e)) {
+        emit("  jmp " + Ltrue);
+        return;
+    }
+    if (dynamic_cast<ELitFalse*>(e)) {
+        emit("  jmp " + Lfalse);
+        return;
+    }
+
+    /* ----------------------------
+       NOT
+       ---------------------------- */
+    if (auto n = dynamic_cast<Not*>(e)) {
+        genCond(n->expr_, Lfalse, Ltrue);
+        return;
+    }
+
+    /* ----------------------------
+       AND (short-circuit)
+       A && B:
+         if A false -> Lfalse
+         else evaluate B
+       ---------------------------- */
+    if (auto a = dynamic_cast<EAnd*>(e)) {
+        std::string Lmid = newLabel(".Land");
+        genCond(a->expr_1, Lmid, Lfalse);
+        emit(Lmid + ":");
+        genCond(a->expr_2, Ltrue, Lfalse);
+        return;
+    }
+
+    /* ----------------------------
+       OR (short-circuit)
+       A || B:
+         if A true -> Ltrue
+         else evaluate B
+       ---------------------------- */
+    if (auto o = dynamic_cast<EOr*>(e)) {
+        std::string Lmid = newLabel(".Lor");
+        genCond(o->expr_1, Ltrue, Lmid);
+        emit(Lmid + ":");
+        genCond(o->expr_2, Ltrue, Lfalse);
+        return;
+    }
+
+    /* ----------------------------
+       Relational comparisons
+       ---------------------------- */
+    if (auto r = dynamic_cast<ERel*>(e)) {
+        // Evaluate left and right into registers
+        r->expr_1->accept(this);  // %rax = left
+        vpushRax();
+        r->expr_2->accept(this);  // %rax = right
+        vpopTo("%r10");           // %r10 = left, %rax = right
+
+        // string == / != must call runtime
+        Type* lt = r->expr_1 ? r->expr_1->inferredType : nullptr;
+
+        if ((dynamic_cast<EQU*>(r->relop_) || dynamic_cast<NE*>(r->relop_)) && isStr(lt)) {
+            spillVStack(); // because runtime call clobbers caller-saved regs
+
+            emit("  movq %r10, %rdi"); // left
+            emit("  movq %rax, %rsi"); // right
+            emit("  call string_eq");  // %rax = 0/1
+
+            emit("  cmpq $0, %rax");
+
+            if (dynamic_cast<EQU*>(r->relop_)) {
+                emit("  jne " + Ltrue);
+                emit("  jmp " + Lfalse);
+            } else {
+                // NE
+                emit("  jne " + Lfalse);
+                emit("  jmp " + Ltrue);
+            }
+            return;
+        }
+
+        // integer/bool comparisons => cmp + jump
+        emit("  cmpq %rax, %r10");
+
+        if (dynamic_cast<LTH*>(r->relop_)) {
+            emit("  jl " + Ltrue);
+        } else if (dynamic_cast<LE*>(r->relop_)) {
+            emit("  jle " + Ltrue);
+        } else if (dynamic_cast<GTH*>(r->relop_)) {
+            emit("  jg " + Ltrue);
+        } else if (dynamic_cast<GE*>(r->relop_)) {
+            emit("  jge " + Ltrue);
+        } else if (dynamic_cast<EQU*>(r->relop_)) {
+            emit("  je " + Ltrue);
+        } else if (dynamic_cast<NE*>(r->relop_)) {
+            emit("  jne " + Ltrue);
+        } else {
+            throw std::runtime_error("Internal compiler error: unknown RelOp in genCond");
+        }
+
+        emit("  jmp " + Lfalse);
+        return;
+    }
+
+    /* ----------------------------
+       Fallback:
+       compute expression value into %rax and test != 0
+       This covers:
+         - EVar of type bool
+         - function calls returning bool
+         - any boolean expr you didn't pattern-match above
+       ---------------------------- */
+    e->accept(this);
+    emit("  cmpq $0, %rax");
+    emit("  jne " + Ltrue);
+    emit("  jmp " + Lfalse);
+}
+
+void AsmGenerator::genBool(Expr* e) {
+    std::string Lt = newLabel(".Ltrue");
+    std::string Lf = newLabel(".Lfalse");
+    std::string Lend = newLabel(".Lend");
+
+    genCond(e, Lt, Lf);
+
+    emit(Lt + ":");
+    emit("  movq $1, %rax");
+    emit("  jmp " + Lend);
+
+    emit(Lf + ":");
+    emit("  movq $0, %rax");
+
+    emit(Lend + ":");
+}
 
 void AsmGenerator::visitProgram(Program *) {}
 void AsmGenerator::visitTopDef(TopDef *) {}
@@ -307,51 +451,48 @@ void AsmGenerator::visitVRet(VRet *) {
 
 
 void AsmGenerator::visitCond(Cond *p) {
-    std::string end = newLabel(".Lend");
+    std::string Lthen = newLabel(".Lthen");
+    std::string Lend  = newLabel(".Lend");
 
-    p->expr_->accept(this);
-    emit("  cmpq $0, %rax");
-    emit("  je " + end);
-    auto savedLocals = locals;
+    genCond(p->expr_, Lthen, Lend);
+
+    emit(Lthen + ":");
     p->stmt_->accept(this);
-    locals = savedLocals;
-    emit(end + ":");
+
+    emit(Lend + ":");
 }
 
 void AsmGenerator::visitCondElse(CondElse *p) {
-    std::string els = newLabel(".Lelse");
-    std::string end = newLabel(".Lend");
+    std::string Lthen = newLabel(".Lthen");
+    std::string Lelse = newLabel(".Lelse");
+    std::string Lend  = newLabel(".Lend");
 
-    p->expr_->accept(this);
-    emit("  cmpq $0, %rax");
-    emit("  je " + els);
+    genCond(p->expr_, Lthen, Lelse);
 
-    auto savedLocals = locals;
+    emit(Lthen + ":");
     p->stmt_1->accept(this);
-    locals = savedLocals;
-    emit("  jmp " + end);
+    emit("  jmp " + Lend);
 
-    emit(els + ":");
-    savedLocals = locals;
+    emit(Lelse + ":");
     p->stmt_2->accept(this);
-    locals = savedLocals;
 
-    emit(end + ":");
+    emit(Lend + ":");
 }
 
 void AsmGenerator::visitWhile(While *p) {
-    std::string start = newLabel(".Lwhile");
-    std::string end = newLabel(".Lend");
+    std::string Lcond = newLabel(".Lcond");
+    std::string Lloop = newLabel(".Lloop");
+    std::string Lend  = newLabel(".Lend");
 
-    emit(start + ":");
-    p->expr_->accept(this);
-    emit("  cmpq $0, %rax");
-    emit("  je " + end);
-    auto savedLocals = locals;
+    emit("  jmp " + Lcond);
+
+    emit(Lloop + ":");
     p->stmt_->accept(this);
-    locals = savedLocals;
-    emit("  jmp " + start);
-    emit(end + ":");
+
+    emit(Lcond + ":");
+    genCond(p->expr_, Lloop, Lend);
+
+    emit(Lend + ":");
 }
 
 void AsmGenerator::visitSExp(SExp *p) {
@@ -469,94 +610,15 @@ void AsmGenerator::visitEAdd(EAdd *p) {
 }
 
 void AsmGenerator::visitERel(ERel *p) {
-    Type* t = p->expr_1->inferredType;
-
-    p->expr_1->accept(this);
-    vpushRax();
-    p->expr_2->accept(this);
-
-    // If strings, handle via runtime calls
-    if (isStr(t)) {
-        if (dynamic_cast<EQU*>(p->relop_)) {
-            vpopTo("%rdi");          // lhs
-            emit("  movq %rax, %rsi"); // rhs
-            spillVStack();
-            emit("  call string_eq");  // result 0/1 in rax
-            return;
-        }
-        if (dynamic_cast<NE*>(p->relop_)) {
-            vpopTo("%rdi");
-            emit("  movq %rax, %rsi");
-            spillVStack();
-            emit("  call string_eq");
-            emit("  xorq $1, %rax");
-            return;
-        }
-
-        // (<, <=, >, >=) not allowed on strings by typechecker
-        throw std::runtime_error("Internal compiler error: invalid string relational op");
-    }
-
-    // Non-string: compare lhs vs rhs
-    vpopTo("%r10");         // r10 = lhs, rax = rhs
-    emit("  cmpq %rax, %r10");
-
-    std::string trueLbl = newLabel(".Ltrue");
-    std::string endLbl  = newLabel(".Lend");
-
-    if (dynamic_cast<LTH*>(p->relop_)) emit("  jl " + trueLbl);
-    else if (dynamic_cast<LE*>(p->relop_)) emit("  jle " + trueLbl);
-    else if (dynamic_cast<GTH*>(p->relop_)) emit("  jg " + trueLbl);
-    else if (dynamic_cast<GE*>(p->relop_)) emit("  jge " + trueLbl);
-    else if (dynamic_cast<EQU*>(p->relop_)) emit("  je " + trueLbl);
-    else if (dynamic_cast<NE*>(p->relop_)) emit("  jne " + trueLbl);
-
-    emit("  movq $0, %rax");
-    emit("  jmp " + endLbl);
-
-    emit(trueLbl + ":");
-    emit("  movq $1, %rax");
-    emit(endLbl + ":");
+    genBool(p);
 }
 
 void AsmGenerator::visitEAnd(EAnd *p) {
-    std::string falseLbl = newLabel(".Lfalse");
-    std::string endLbl   = newLabel(".Lend");
-
-    p->expr_1->accept(this);
-    emit("  cmpq $0, %rax");
-    emit("  je " + falseLbl);
-
-    p->expr_2->accept(this);
-    emit("  cmpq $0, %rax");
-    emit("  je " + falseLbl);
-
-    emit("  movq $1, %rax");
-    emit("  jmp " + endLbl);
-
-    emit(falseLbl + ":");
-    emit("  movq $0, %rax");
-    emit(endLbl + ":");
+    genBool(p); // p jest Expr*
 }
 
 void AsmGenerator::visitEOr(EOr *p) {
-    std::string trueLbl = newLabel(".Ltrue");
-    std::string endLbl  = newLabel(".Lend");
-
-    p->expr_1->accept(this);
-    emit("  cmpq $0, %rax");
-    emit("  jne " + trueLbl);
-
-    p->expr_2->accept(this);
-    emit("  cmpq $0, %rax");
-    emit("  jne " + trueLbl);
-
-    emit("  movq $0, %rax");
-    emit("  jmp " + endLbl);
-
-    emit(trueLbl + ":");
-    emit("  movq $1, %rax");
-    emit(endLbl + ":");
+    genBool(p); // p jest Expr*
 }
 
 void AsmGenerator::visitEApp(EApp *p) {
