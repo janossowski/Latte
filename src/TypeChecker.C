@@ -317,26 +317,22 @@ void TypeChecker::visitProg(Prog *p)
         // Propagate maximum required tail call argument counts
         int fndefsCount = 0;
         fndefsCount = p->listtopdef_->size();
-        printf("Total number of function definitions: %d\n", fndefsCount);
         for (int i = 0; i < fndefsCount; i++) {
             for (TopDef *topDef : *p->listtopdef_) {
                 FnDef *fnDef = dynamic_cast<FnDef *>(topDef);
                 if (fnDef) {
                     for (const std::string &tailCalled : fnDef->tailCalledFunctions){
-                    printf("Function '%s' contains a tail call to function '%s'.\n", fnDef->ident_.c_str(), tailCalled.c_str());
                     fnDef->tailArgCount = std::max(fnDef->tailArgCount, functionDefs[tailCalled]->tailArgCount);
                     }
                 }
             }
         }
 
-        printf("Computing tail call argument requirements:\n");
 
         for (TopDef *topDef : *p->listtopdef_) {
             FnDef *fnDef = dynamic_cast<FnDef *>(topDef);
             if (fnDef) {
                 for (Ident called : fnDef->calledFunctions) {
-                    printf("Function '%s' calls function '%s'.\n", fnDef->ident_.c_str(), called.c_str());
                     if (called != "printString" &&
                         called != "printInt" &&
                         called != "error" &&
@@ -353,14 +349,6 @@ void TypeChecker::visitProg(Prog *p)
             }
         }
 
-        printf("Computed tail call argument requirements:\n");
-
-        for (TopDef *topDef : *p->listtopdef_) {
-            FnDef *fnDef = dynamic_cast<FnDef *>(topDef);
-            if (fnDef) {
-                printf("Function '%s' requires a maximum of %d arguments for tail calls.\n", fnDef->ident_.c_str(), fnDef->tailArgCount);
-            }
-        }
     }
 }
 
@@ -410,10 +398,6 @@ void TypeChecker::visitFnDef(FnDef *p)
     p->tailCalledFunctions = currentFunctionTailCalls;
     p->calledFunctions = currentFunctionCalls;
 
-    for (const std::string &tailCall : currentFunctionTailCalls)
-    {
-        printf("Function '%s' contains a tail call to function '%s'.\n", functionName.c_str(), tailCall.c_str());
-    }
     p->localsSize = currentFunctionLocalsSize;
     p->tailArgCount = static_cast<int>(argumentTypes.size());
     currentFunctionReturnType = nullptr;

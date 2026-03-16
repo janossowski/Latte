@@ -55,22 +55,14 @@ void AsmGenerator::resetVStack() {
     vstack.clear();
     freeEvalRegs.clear();
 
-    // caller-saved, safe scratch regs (not used for arg passing)
-    // choose as many as you like
     freeEvalRegs.push_back("%rcx");
     freeEvalRegs.push_back("%r8");
     freeEvalRegs.push_back("%r9");
-    // freeEvalRegs.push_back("%r10");
-    // freeEvalRegs.push_back("%r11");
-    // freeEvalRegs.push_back("%rdx"); // careful with idiv
 }
 
 
 void AsmGenerator::vpushRax() {
-    // If no free regs, evict oldest reg-backed value into real stack
     if (freeEvalRegs.empty()) {
-        // Only possible if there exists some REG slot already
-        // (because otherwise we were storing everything in memory already)
         if (oldestRegSlotIndex() != -1) {
             evictOldestRegToStack();
         }
@@ -83,7 +75,6 @@ void AsmGenerator::vpushRax() {
         emit("  movq %rax, " + r);
         vstack.push_back({SlotKind::REG, r});
     } else {
-        // no regs at all -> spill directly
         emit("  pushq %rax");
         vstack.push_back({SlotKind::STACK, ""});
     }
@@ -107,7 +98,6 @@ void AsmGenerator::vpopTo(const std::string& dst) {
 
 
 void AsmGenerator::spillVStack() {
-    // Turn all REG slots into STACK slots, preserving order
     for (auto &s : vstack) {
         if (s.kind == SlotKind::REG) {
             emit("  pushq " + s.reg);
@@ -133,33 +123,19 @@ void AsmGenerator::evictOldestRegToStack() {
 
     std::string reg = vstack[idx].reg;
 
-    // push it to real stack (becomes older part of stack)
     emit("  pushq " + reg);
 
-    // free that register
     freeEvalRegs.push_back(reg);
 
-    // convert that slot to STACK
     vstack[idx].kind = SlotKind::STACK;
     vstack[idx].reg.clear();
-
-    // IMPORTANT: this keeps all remaining REG slots at the end,
-    // because we removed the oldest one.
 }
-
-/* ============================================================
-   Jumping code: genCond / genBool
-   ============================================================ */
 
 void AsmGenerator::genCond(Expr* e, const std::string& Ltrue, const std::string& Lfalse) {
     if (!e) {
         emit("  jmp " + Lfalse);
         return;
     }
-
-    /* ----------------------------
-       Literal booleans
-       ---------------------------- */
     if (dynamic_cast<ELitTrue*>(e)) {
         emit("  jmp " + Ltrue);
         return;
@@ -168,21 +144,10 @@ void AsmGenerator::genCond(Expr* e, const std::string& Ltrue, const std::string&
         emit("  jmp " + Lfalse);
         return;
     }
-
-    /* ----------------------------
-       NOT
-       ---------------------------- */
     if (auto n = dynamic_cast<Not*>(e)) {
         genCond(n->expr_, Lfalse, Ltrue);
         return;
     }
-
-    /* ----------------------------
-       AND (short-circuit)
-       A && B:
-         if A false -> Lfalse
-         else evaluate B
-       ---------------------------- */
     if (auto a = dynamic_cast<EAnd*>(e)) {
         std::string Lmid = newLabel(".Land");
         genCond(a->expr_1, Lmid, Lfalse);
@@ -190,13 +155,6 @@ void AsmGenerator::genCond(Expr* e, const std::string& Ltrue, const std::string&
         genCond(a->expr_2, Ltrue, Lfalse);
         return;
     }
-
-    /* ----------------------------
-       OR (short-circuit)
-       A || B:
-         if A true -> Ltrue
-         else evaluate B
-       ---------------------------- */
     if (auto o = dynamic_cast<EOr*>(e)) {
         std::string Lmid = newLabel(".Lor");
         genCond(o->expr_1, Ltrue, Lmid);
@@ -205,25 +163,20 @@ void AsmGenerator::genCond(Expr* e, const std::string& Ltrue, const std::string&
         return;
     }
 
-    /* ----------------------------
-       Relational comparisons
-       ---------------------------- */
     if (auto r = dynamic_cast<ERel*>(e)) {
-        // Evaluate left and right into registers
-        r->expr_1->accept(this);  // %rax = left
+        r->expr_1->accept(this);
         vpushRax();
-        r->expr_2->accept(this);  // %rax = right
-        vpopTo("%r10");           // %r10 = left, %rax = right
+        r->expr_2->accept(this);
+        vpopTo("%r10");
 
-        // string == / != must call runtime
         Type* lt = r->expr_1 ? r->expr_1->inferredType : nullptr;
 
         if ((dynamic_cast<EQU*>(r->relop_) || dynamic_cast<NE*>(r->relop_)) && isStr(lt)) {
-            spillVStack(); // because runtime call clobbers caller-saved regs
+            spillVStack();
 
-            emit("  movq %r10, %rdi"); // left
-            emit("  movq %rax, %rsi"); // right
-            emit("  call string_eq");  // %rax = 0/1
+            emit("  movq %r10, %rdi");
+            emit("  movq %rax, %rsi");
+            emit("  call string_eq");
 
             emit("  cmpq $0, %rax");
 
@@ -231,14 +184,12 @@ void AsmGenerator::genCond(Expr* e, const std::string& Ltrue, const std::string&
                 emit("  jne " + Ltrue);
                 emit("  jmp " + Lfalse);
             } else {
-                // NE
                 emit("  jne " + Lfalse);
                 emit("  jmp " + Ltrue);
             }
             return;
         }
 
-        // integer/bool comparisons => cmp + jump
         emit("  cmpq %rax, %r10");
 
         if (dynamic_cast<LTH*>(r->relop_)) {
@@ -261,14 +212,6 @@ void AsmGenerator::genCond(Expr* e, const std::string& Ltrue, const std::string&
         return;
     }
 
-    /* ----------------------------
-       Fallback:
-       compute expression value into %rax and test != 0
-       This covers:
-         - EVar of type bool
-         - function calls returning bool
-         - any boolean expr you didn't pattern-match above
-       ---------------------------- */
     e->accept(this);
     emit("  cmpq $0, %rax");
     emit("  jne " + Ltrue);
@@ -523,13 +466,13 @@ void AsmGenerator::visitELitFalse(ELitFalse *) {
 }
 
 void AsmGenerator::visitEString(EString *p) {
-    spillVStack(); // IMPORTANT: call may clobber %r10/%r11
+    spillVStack();
 
     std::string lbl = newLabel(".str");
     stringLiterals.push_back(lbl + ": .string \"" + escape(p->string_) + "\"");
 
     emit("  leaq " + lbl + "(%rip), %rdi");
-    emit("  call string_from_cstr"); // returns String* in %rax
+    emit("  call string_from_cstr");
 }
 
 void AsmGenerator::visitNeg(Neg *p) {
@@ -549,19 +492,16 @@ void AsmGenerator::visitEMul(EMul *p) {
     vpushRax();
 
     p->expr_2->accept(this);
-    vpopTo("%r10");   // r10 = left, rax = right  (SAFE: r10 not in pool)
+    vpopTo("%r10");
 
     if (dynamic_cast<Times *>(p->mulop_)) {
         emit("  imulq %r10, %rax");
         return;
     }
 
-    // division/mod clobbers rax/rdx, so flush any eval regs still alive
-    // spillVStack();
-
     if (dynamic_cast<Div *>(p->mulop_)) {
-        emit("  movq %rax, %r11");  // divisor = right
-        emit("  movq %r10, %rax");  // dividend = left
+        emit("  movq %rax, %r11");
+        emit("  movq %r10, %rax");
         emit("  cqto");
         emit("  idivq %r11");
         return;
@@ -580,32 +520,25 @@ void AsmGenerator::visitEMul(EMul *p) {
 void AsmGenerator::visitEAdd(EAdd *p) {
     Type* t = p->inferredType;
 
-    // lhs -> %rax
     p->expr_1->accept(this);
     vpushRax();
 
-    // rhs -> %rax
     p->expr_2->accept(this);
 
     if (dynamic_cast<Plus*>(p->addop_)) {
         if (isInt(t)) {
-            // lhs -> %r10, rhs already in %rax
             vpopTo("%r10");
-            emit("  addq %r10, %rax");   // rax = rhs + lhs
+            emit("  addq %r10, %rax");
         } else if (isStr(t)) {
-            // string_concat(lhs, rhs)
-            // lhs -> %rdi, rhs -> %rsi
             vpopTo("%rdi");
             emit("  movq %rax, %rsi");
             spillVStack();
             emit("  call string_concat");
         }
     } else {
-        // minus (only ints by typechecker)
-        // compute lhs - rhs
-        vpopTo("%r10");                 // r10 = lhs
-        emit("  subq %rax, %r10");       // r10 = lhs - rhs
-        emit("  movq %r10, %rax");       // result -> rax
+        vpopTo("%r10");
+        emit("  subq %rax, %r10");
+        emit("  movq %r10, %rax");
     }
 }
 
@@ -614,15 +547,15 @@ void AsmGenerator::visitERel(ERel *p) {
 }
 
 void AsmGenerator::visitEAnd(EAnd *p) {
-    genBool(p); // p jest Expr*
+    genBool(p);
 }
 
 void AsmGenerator::visitEOr(EOr *p) {
-    genBool(p); // p jest Expr*
+    genBool(p);
 }
 
 void AsmGenerator::visitEApp(EApp *p) {
-    spillVStack(); // IMPORTANT: protect any pending virtual stack values
+    spillVStack();
 
     static const char* argRegs[] = {
         "%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"
@@ -646,29 +579,25 @@ void AsmGenerator::visitEApp(EApp *p) {
     bool canTailCall =
         inTailCallPosition &&
         currentFunction != nullptr &&
-        std::string(currentFunction->ident_) != "main";
+        (std::string(currentFunction->ident_) != "main" || requiredStackArgs == 0);
 
     if (canTailCall) {
-        // evaluate args and push results
         for (int i = 0; i < argCount; ++i) {
             (*p->listexpr_)[i]->accept(this);
             emit("  pushq %rax");
         }
 
-        // write stack args to 16(%rbp)+
         for (int i = argCount; i >= 7; --i) {
             int slotOffset = 16 + (i - 7) * 8;
             emit("  popq %rax");
             emit("  movq %rax, " + std::to_string(slotOffset) + "(%rbp)");
         }
 
-        // padding slots
         for (int k = stackArgs + 1; k <= requiredStackArgs; ++k) {
             int slotOffset = 16 + (k - 1) * 8;
             emit("  movq $0, " + std::to_string(slotOffset) + "(%rbp)");
         }
 
-        // pop reg args
         for (int i = regArgs; i >= 1; --i) {
             emit("  popq %rax");
             emit("  movq %rax, " + std::string(argRegs[i - 1]));
@@ -679,23 +608,19 @@ void AsmGenerator::visitEApp(EApp *p) {
         return;
     }
 
-    // padding first
     for (int i = 0; i < paddingStackArgs; ++i)
         emit("  pushq $0");
 
-    // real stack args right-to-left
     for (int i = argCount - 1; i >= 6; --i) {
         (*p->listexpr_)[i]->accept(this);
         emit("  pushq %rax");
     }
 
-    // reg args left-to-right, pushed temporarily
     for (int i = 0; i < regArgs; ++i) {
         (*p->listexpr_)[i]->accept(this);
         emit("  pushq %rax");
     }
 
-    // pop into regs
     for (int i = regArgs - 1; i >= 0; --i)
         emit("  popq " + std::string(argRegs[i]));
 
